@@ -11,7 +11,6 @@ from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 import logging
-from .pentaircloud import PentairCloudHub
 
 from .const import DOMAIN
 
@@ -55,6 +54,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     try:
+        from .pentaircloud import PentairCloudHub
+
         hub = PentairCloudHub(_LOGGER)
         if not await hass.async_add_executor_job(
             hub.authenticate, entry.data["username"], entry.data["password"]
