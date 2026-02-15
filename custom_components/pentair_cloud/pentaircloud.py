@@ -126,6 +126,7 @@ class PentairCloudHub:
         self.AWS_SECRET_ACCESS_KEY = None
         self.AWS_SESSION_TOKEN = None
         self.last_update = None
+        self.last_action_time: float | None = None
         self.username = None
         self.password = None
         self.devices = []
@@ -172,6 +173,23 @@ class PentairCloudHub:
                 err,
             )
 
+    def notify_action(self) -> None:
+        """Mark that a user action just occurred, triggering burst polling."""
+        self.last_action_time = time.time()
+
+    def _get_update_interval(self) -> int:
+        """Return dynamic minimum seconds between updates based on last action time."""
+        if self.last_action_time is None:
+            return UPDATE_MIN_SECONDS
+        elapsed = time.time() - self.last_action_time
+        if elapsed <= 60:
+            return 5
+        elif elapsed <= 180:
+            return 15
+        elif elapsed <= 300:
+            return 30
+        return UPDATE_MIN_SECONDS
+
     def get_pentair_header(self) -> str:
         return {
             "x-amz-id-token": self.AWS_TOKEN,
@@ -201,6 +219,8 @@ class PentairCloudHub:
                 for device in response.json()["data"]:
                     if device["deviceType"] == "IF31":
                         if device["status"] == "ACTIVE":
+                            if any(d.pentair_device_id == device["deviceId"] for d in self.devices):
+                                continue
                             self.devices.append(
                                 PentairDevice(
                                     self.LOGGER,
@@ -239,7 +259,7 @@ class PentairCloudHub:
     def update_pentair_devices_status(self) -> None:
         if (
             self.last_update == None
-            or time.time() - self.last_update > UPDATE_MIN_SECONDS
+            or time.time() - self.last_update > self._get_update_interval()
         ):
             if DEBUG_INFO:
                 self.LOGGER.info("Pentair Cloud - Update Devices Status")
