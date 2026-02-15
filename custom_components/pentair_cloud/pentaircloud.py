@@ -127,6 +127,7 @@ class PentairCloudHub:
         self.AWS_SESSION_TOKEN = None
         self.last_update = None
         self.last_action_time: float | None = None
+        self.aws_credentials_expiry: float | None = None
         self.username = None
         self.password = None
         self.devices = []
@@ -141,7 +142,12 @@ class PentairCloudHub:
         if self.cognito_client is not None:
             self.cognito_client.check_token()
             new_token = self.cognito_client.get_user()._metadata["id_token"]
-            if self.AWS_TOKEN != new_token:  # Token has been refreshed
+            token_changed = self.AWS_TOKEN != new_token
+            creds_expired = (
+                self.aws_credentials_expiry is not None
+                and time.time() > self.aws_credentials_expiry - 300
+            )
+            if token_changed or creds_expired:
                 self.AWS_TOKEN = new_token
                 self.populate_AWS_and_data_fields()
 
@@ -164,6 +170,7 @@ class PentairCloudHub:
             self.AWS_ACCESS_KEY_ID = response["Credentials"]["AccessKeyId"]
             self.AWS_SECRET_ACCESS_KEY = response["Credentials"]["SecretKey"]
             self.AWS_SESSION_TOKEN = response["Credentials"]["SessionToken"]
+            self.aws_credentials_expiry = response["Credentials"]["Expiration"].timestamp()
             if DEBUG_INFO:
                 self.LOGGER.info("Pentair Cloud complete Populate AWS Fields")
             self.populate_pentair_devices()
@@ -324,14 +331,18 @@ class PentairCloudHub:
                         response_data,
                     )
                     try:
-                        self.LOGGER.error("Timeout detected. Logging Again")
-                        if "timeout" in response_data["message"]:
+                        message = response_data.get("message", "")
+                        if "expired" in message.lower():
+                            self.LOGGER.error("Signature/credentials expired. Refreshing credentials.")
+                            self.populate_AWS_and_data_fields()
+                        elif "timeout" in message.lower():
+                            self.LOGGER.error("Timeout detected. Logging Again")
                             self.authenticate(
                                 self.username, self.password
-                            )  # Refresh authentication in case of timeout
+                            )
                     except Exception as err2:
                         self.LOGGER.error(
-                            "ERROR in Timeout detection loop.",
+                            "ERROR in error recovery loop.",
                             err2,
                         )
             else:
