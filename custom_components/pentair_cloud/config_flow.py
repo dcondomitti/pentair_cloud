@@ -99,7 +99,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Pentair Cloud options."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        super().__init__()
         self._devices: list = []
         self._device_index: int = 0
         self._options: dict[str, Any] = dict(config_entry.options)

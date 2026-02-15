@@ -46,12 +46,7 @@ class PentairCloudSwitch(SwitchEntity):
         self.hub = hub
         self.pentair_device = pentair_device
         self.pentair_program = pentair_program
-        self._attr_name = (
-            "P"
-            + str(self.pentair_program.id)
-            + " / "
-            + self.pentair_program.name
-        )
+        self._attr_name = self.pentair_program.name
         self._state = self.pentair_program.running
         self._scheduled_refreshes: list[CALLBACK_TYPE] = []
         if DEBUG_INFO:
