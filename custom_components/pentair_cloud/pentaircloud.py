@@ -58,6 +58,7 @@ class PentairDevice:
         self.last_program_start = None
         self.active_program = None
         self.programs = []
+        self.sensor_data: dict[str, str | None] = {}
 
     def update_program(
         self, id: int, name: str, program_type: int, running_program: int
@@ -290,6 +291,11 @@ class PentairCloudHub:
                                             program_type,
                                             running_program,
                                         )
+                                # Extract sensor fields
+                                SENSOR_FIELDS = ["s17", "s18", "s19", "s20", "s21", "s22", "s26", "s28", "s36", "s38", "s39", "s40", "s41", "s48"]
+                                for field_key in SENSOR_FIELDS:
+                                    field = device_response["fields"].get(field_key)
+                                    device.sensor_data[field_key] = field.get("value") if field is not None else None
 
                 except Exception as err:
                     self.LOGGER.error(

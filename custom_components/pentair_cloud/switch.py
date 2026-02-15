@@ -1,16 +1,9 @@
-"""Platform for light integration."""
+"""Platform for switch integration."""
 from __future__ import annotations
 
 import logging
 
-# Import the device class from the component that you want to support
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.light import (
-    ATTR_BRIGHTNESS,
-    PLATFORM_SCHEMA,
-    LightEntity,
-)
-
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
@@ -31,13 +24,15 @@ async def async_setup_entry(
     cloud_devices = []
     for device in devices:
         for program in device.programs:
-            cloud_devices.append(PentairCloudLight(_LOGGER, hub, device, program))
+            cloud_devices.append(PentairCloudSwitch(_LOGGER, hub, device, program))
     async_add_entities(cloud_devices)
 
 
-class PentairCloudLight(LightEntity):
+class PentairCloudSwitch(SwitchEntity):
     global DOMAIN
     global DEBUG_INFO
+
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -50,17 +45,15 @@ class PentairCloudLight(LightEntity):
         self.hub = hub
         self.pentair_device = pentair_device
         self.pentair_program = pentair_program
-        self._name = (
-            "Pentair "
-            + self.pentair_device.nickname
-            + " - P"
+        self._attr_name = (
+            "P"
             + str(self.pentair_program.id)
             + " / "
             + self.pentair_program.name
         )
         self._state = self.pentair_program.running
         if DEBUG_INFO:
-            self.LOGGER.info("Pentair Cloud Pump " + self._name + " Configured")
+            self.LOGGER.info("Pentair Cloud Pump " + self._attr_name + " Configured")
 
     @property
     def unique_id(self):
@@ -75,7 +68,6 @@ class PentairCloudLight(LightEntity):
     def device_info(self):
         return {
             "identifiers": {
-                # Serial numbers are unique identifiers within a specific domain
                 (DOMAIN, f"pentair_" + self.pentair_device.pentair_device_id)
             },
             "name": self.pentair_device.nickname,
@@ -85,12 +77,8 @@ class PentairCloudLight(LightEntity):
         }
 
     @property
-    def name(self) -> str:
-        return self._name
-
-    @property
     def is_on(self) -> bool | None:
-        """Return true if light is on."""
+        """Return true if switch is on."""
         if DEBUG_INFO:
             self.LOGGER.info(
                 "Pentair Cloud Pump "
@@ -101,10 +89,7 @@ class PentairCloudLight(LightEntity):
         return self._state
 
     def turn_on(self, **kwargs) -> None:
-        """Instruct the light to turn on.
-        You can skip the brightness part if your light does not support
-        brightness control.
-        """
+        """Instruct the switch to turn on."""
         if DEBUG_INFO:
             self.LOGGER.info(
                 "Pentair Cloud Pump "
@@ -118,7 +103,7 @@ class PentairCloudLight(LightEntity):
         )
 
     def turn_off(self, **kwargs) -> None:
-        """Instruct the light to turn off."""
+        """Instruct the switch to turn off."""
         if DEBUG_INFO:
             self.LOGGER.info(
                 "Pentair Cloud Pump "
@@ -132,9 +117,7 @@ class PentairCloudLight(LightEntity):
         )
 
     def update(self) -> None:
-        """Fetch new state data for this light.
-        This is the only method that should fetch new data for Home Assistant.
-        """
+        """Fetch new state data for this switch."""
         self.hub.update_pentair_devices_status()
         self._state = self.pentair_program.running
         if DEBUG_INFO:
