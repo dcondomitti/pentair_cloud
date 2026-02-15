@@ -1,7 +1,9 @@
 """Platform for sensor integration."""
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
+import time
 from typing import Callable
 import logging
 
@@ -18,9 +20,11 @@ from homeassistant.const import (
     UnitOfTemperature,
     UnitOfTime,
     UnitOfElectricPotential,
+    UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN
@@ -243,6 +247,8 @@ async def async_setup_entry(
     for device in devices:
         for description in SENSOR_DESCRIPTIONS:
             entities.append(PentairCloudSensor(hub, device, description))
+        entities.append(PentairFlowTotalSensor(hub, device, daily=False))
+        entities.append(PentairFlowTotalSensor(hub, device, daily=True))
     async_add_entities(entities)
 
 
@@ -285,3 +291,134 @@ class PentairCloudSensor(SensorEntity):
     def update(self) -> None:
         """Fetch new state data for this sensor."""
         self.hub.update_pentair_devices_status()
+
+
+class PentairFlowTotalSensor(RestoreEntity, SensorEntity):
+    """Sensor that integrates flow rate over time to compute gallons."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:water"
+
+    def __init__(
+        self,
+        hub: PentairCloudHub,
+        pentair_device: PentairDevice,
+        daily: bool,
+    ) -> None:
+        self.hub = hub
+        self.pentair_device = pentair_device
+        self._daily = daily
+        self._total_gallons = 0.0
+        self._last_update_ts: float | None = None
+        self._last_reset_date: str | None = None
+
+        if daily:
+            self._attr_name = "Daily Gallons"
+            self._attr_unique_id = (
+                f"pentair_{pentair_device.pentair_device_id}_daily_gallons"
+            )
+            self._attr_state_class = SensorStateClass.TOTAL
+        else:
+            self._attr_name = "Total Gallons"
+            self._attr_unique_id = (
+                f"pentair_{pentair_device.pentair_device_id}_total_gallons"
+            )
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {
+                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
+            },
+            "name": self.pentair_device.nickname,
+            "model": self.pentair_device.nickname,
+            "sw_version": "1.0",
+            "manufacturer": "Pentair",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Restore state after restart."""
+        await super().async_added_to_hass()
+        last_data = await self.async_get_last_sensor_data()
+        if last_data and last_data.native_value is not None:
+            try:
+                restored = float(last_data.native_value)
+            except (ValueError, TypeError):
+                restored = 0.0
+            if self._daily:
+                today = datetime.date.today().isoformat()
+                if (
+                    last_data.native_unit_of_measurement is not None
+                    and hasattr(last_data, "native_value")
+                ):
+                    # Check extra stored state for last_reset date
+                    last_state = await self.async_get_last_state()
+                    last_reset_date = None
+                    if last_state and last_state.attributes.get("last_reset"):
+                        try:
+                            last_reset_dt = datetime.datetime.fromisoformat(
+                                last_state.attributes["last_reset"]
+                            )
+                            last_reset_date = last_reset_dt.date().isoformat()
+                        except (ValueError, TypeError):
+                            pass
+                    if last_reset_date == today:
+                        self._total_gallons = restored
+                    else:
+                        self._total_gallons = 0.0
+                self._last_reset_date = datetime.date.today().isoformat()
+                self._attr_last_reset = datetime.datetime.combine(
+                    datetime.date.today(),
+                    datetime.time.min,
+                    tzinfo=datetime.timezone.utc,
+                )
+            else:
+                self._total_gallons = restored
+        # Always leave _last_update_ts = None so first interval is skipped
+        self._last_update_ts = None
+
+    @property
+    def native_value(self) -> float | None:
+        return round(self._total_gallons, 1)
+
+    def update(self) -> None:
+        """Integrate flow rate over elapsed time."""
+        self.hub.update_pentair_devices_status()
+
+        raw = self.pentair_device.sensor_data.get("s26")
+        if raw is None:
+            flow_gpm = 0.0
+        else:
+            try:
+                flow_gpm = int(raw) / 10
+            except (ValueError, TypeError):
+                flow_gpm = 0.0
+
+        now = time.monotonic()
+
+        if self._last_update_ts is None:
+            self._last_update_ts = now
+            return
+
+        elapsed = now - self._last_update_ts
+        # Cap at 120 seconds to avoid counting long gaps (e.g. HA downtime)
+        if elapsed > 120:
+            elapsed = 120
+
+        if self._daily:
+            today = datetime.date.today().isoformat()
+            if self._last_reset_date != today:
+                self._total_gallons = 0.0
+                self._last_reset_date = today
+                self._attr_last_reset = datetime.datetime.combine(
+                    datetime.date.today(),
+                    datetime.time.min,
+                    tzinfo=datetime.timezone.utc,
+                )
+
+        self._total_gallons += flow_gpm * (elapsed / 60)
+        self._last_update_ts = now
