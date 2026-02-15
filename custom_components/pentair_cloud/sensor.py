@@ -252,6 +252,9 @@ async def async_setup_entry(
             PentairFlowTotalSensor(hub, device, daily=True, config_entry=config_entry)
         )
         entities.append(PentairPoolTurnoverSensor(hub, device, config_entry))
+        entities.append(PentairDailyRuntimeSensor(hub, device, "s19", "Daily Runtime", "daily_runtime"))
+        entities.append(PentairDailyRuntimeSensor(hub, device, "s21", "Relay 1 Daily Runtime", "relay_1_daily_runtime"))
+        entities.append(PentairDailyRuntimeSensor(hub, device, "s22", "Relay 2 Daily Runtime", "relay_2_daily_runtime"))
     async_add_entities(entities)
 
 
@@ -491,3 +494,116 @@ class PentairPoolTurnoverSensor(SensorEntity):
 
     def update(self) -> None:
         self.hub.update_pentair_devices_status()
+
+
+class PentairDailyRuntimeSensor(RestoreSensor):
+    """Sensor that tracks how long a field has been active today (hours)."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:timer-outline"
+
+    def __init__(
+        self,
+        hub: PentairCloudHub,
+        pentair_device: PentairDevice,
+        field_key: str,
+        name: str,
+        key_suffix: str,
+    ) -> None:
+        self.hub = hub
+        self.pentair_device = pentair_device
+        self._field_key = field_key
+        self._total_hours = 0.0
+        self._last_update_ts: float | None = None
+        self._last_reset_date: str | None = datetime.date.today().isoformat()
+        self._attr_name = name
+        self._attr_unique_id = (
+            f"pentair_{pentair_device.pentair_device_id}_{key_suffix}"
+        )
+        self._attr_last_reset = datetime.datetime.combine(
+            datetime.date.today(),
+            datetime.time.min,
+            tzinfo=datetime.timezone.utc,
+        )
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {
+                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
+            },
+            "name": self.pentair_device.nickname,
+            "model": self.pentair_device.nickname,
+            "sw_version": "1.0",
+            "manufacturer": "Pentair",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Restore state after restart."""
+        await super().async_added_to_hass()
+        last_data = await self.async_get_last_sensor_data()
+        if last_data and last_data.native_value is not None:
+            try:
+                restored = float(last_data.native_value)
+            except (ValueError, TypeError):
+                restored = 0.0
+            today = datetime.date.today().isoformat()
+            last_state = await self.async_get_last_state()
+            last_reset_date = None
+            if last_state and last_state.attributes.get("last_reset"):
+                try:
+                    last_reset_dt = datetime.datetime.fromisoformat(
+                        last_state.attributes["last_reset"]
+                    )
+                    last_reset_date = last_reset_dt.date().isoformat()
+                except (ValueError, TypeError):
+                    pass
+            if last_reset_date == today:
+                self._total_hours = restored
+        self._last_update_ts = None
+
+    @property
+    def native_value(self) -> float | None:
+        return round(self._total_hours, 2)
+
+    def _is_active(self) -> bool:
+        """Return True if the monitored field indicates an active state."""
+        raw = self.pentair_device.sensor_data.get(self._field_key)
+        if raw is None:
+            return False
+        try:
+            return int(raw) > 0
+        except (ValueError, TypeError):
+            return False
+
+    def update(self) -> None:
+        self.hub.update_pentair_devices_status()
+
+        now = time.monotonic()
+
+        if self._last_update_ts is None:
+            self._last_update_ts = now
+            return
+
+        elapsed = now - self._last_update_ts
+        if elapsed > 120:
+            elapsed = 120
+
+        today = datetime.date.today().isoformat()
+        if self._last_reset_date != today:
+            self._total_hours = 0.0
+            self._last_reset_date = today
+            self._attr_last_reset = datetime.datetime.combine(
+                datetime.date.today(),
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            )
+
+        if self._is_active():
+            self._total_hours += elapsed / 3600
+
+        self._last_update_ts = now
