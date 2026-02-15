@@ -16,5 +16,19 @@
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     }
+  },
+  "options": {
+    "step": {
+      "device": {
+        "title": "Configure {device_name}",
+        "data": {
+          "pool_size": "Pool Size (gallons)",
+          "target_turnovers": "Target Turnovers Per Day"
+        }
+      }
+    },
+    "abort": {
+      "no_devices": "No devices found"
+    }
   }
 }

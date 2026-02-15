@@ -27,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_POOL_SIZE
 from .pentaircloud import PentairCloudHub, PentairDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -248,7 +248,10 @@ async def async_setup_entry(
         for description in SENSOR_DESCRIPTIONS:
             entities.append(PentairCloudSensor(hub, device, description))
         entities.append(PentairFlowTotalSensor(hub, device, daily=False))
-        entities.append(PentairFlowTotalSensor(hub, device, daily=True))
+        entities.append(
+            PentairFlowTotalSensor(hub, device, daily=True, config_entry=config_entry)
+        )
+        entities.append(PentairPoolTurnoverSensor(hub, device, config_entry))
     async_add_entities(entities)
 
 
@@ -307,6 +310,7 @@ class PentairFlowTotalSensor(RestoreSensor):
         hub: PentairCloudHub,
         pentair_device: PentairDevice,
         daily: bool,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         self.hub = hub
         self.pentair_device = pentair_device
@@ -314,6 +318,7 @@ class PentairFlowTotalSensor(RestoreSensor):
         self._total_gallons = 0.0
         self._last_update_ts: float | None = None
         self._last_reset_date: str | None = None
+        self._entry_id = config_entry.entry_id if config_entry else None
 
         if daily:
             self._attr_name = "Daily Gallons"
@@ -375,10 +380,20 @@ class PentairFlowTotalSensor(RestoreSensor):
                 self._total_gallons = restored
         # Always leave _last_update_ts = None so first interval is skipped
         self._last_update_ts = None
+        self._write_daily_gallons()
 
     @property
     def native_value(self) -> float | None:
         return round(self._total_gallons, 1)
+
+    def _write_daily_gallons(self) -> None:
+        """Write current daily gallons to hass.data for other sensors to read."""
+        if self._daily and self._entry_id and self.hass:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+            if entry_data is not None:
+                entry_data["daily_gallons"][
+                    self.pentair_device.pentair_device_id
+                ] = self._total_gallons
 
     def update(self) -> None:
         """Integrate flow rate over elapsed time."""
@@ -397,6 +412,7 @@ class PentairFlowTotalSensor(RestoreSensor):
 
         if self._last_update_ts is None:
             self._last_update_ts = now
+            self._write_daily_gallons()
             return
 
         elapsed = now - self._last_update_ts
@@ -417,3 +433,61 @@ class PentairFlowTotalSensor(RestoreSensor):
 
         self._total_gallons += flow_gpm * (elapsed / 60)
         self._last_update_ts = now
+        self._write_daily_gallons()
+
+
+class PentairPoolTurnoverSensor(SensorEntity):
+    """Sensor showing what percentage of the pool has been cycled today."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Pool Cycled Today"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+    _attr_icon = "mdi:sync"
+
+    def __init__(
+        self,
+        hub: PentairCloudHub,
+        pentair_device: PentairDevice,
+        config_entry: ConfigEntry,
+    ) -> None:
+        self.hub = hub
+        self.pentair_device = pentair_device
+        self._config_entry = config_entry
+        self._attr_unique_id = (
+            f"pentair_{pentair_device.pentair_device_id}_pool_turnover"
+        )
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {
+                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
+            },
+            "name": self.pentair_device.nickname,
+            "model": self.pentair_device.nickname,
+            "sw_version": "1.0",
+            "manufacturer": "Pentair",
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self._config_entry.entry_id
+        )
+        if entry_data is None:
+            return None
+        daily_gallons = entry_data["daily_gallons"].get(
+            self.pentair_device.pentair_device_id, 0.0
+        )
+        pool_size = self._config_entry.options.get(
+            f"pool_size_{self.pentair_device.pentair_device_id}",
+            DEFAULT_POOL_SIZE,
+        )
+        if pool_size <= 0:
+            return None
+        return (daily_gallons / pool_size) * 100
+
+    def update(self) -> None:
+        self.hub.update_pentair_devices_status()

@@ -14,7 +14,7 @@ import logging
 
 from .const import DOMAIN
 
-PLATFORMS: list[Platform] = [Platform.SWITCH, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SWITCH, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 CONFIG_SCHEMA = vol.Schema(
     {
@@ -69,7 +69,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             f"Exception while setting up Pentair Cloud. Will retry. {err}"
         )
 
-    hass.data[DOMAIN][entry.entry_id] = {"pentair_cloud_hub": hub}
+    hass.data[DOMAIN][entry.entry_id] = {
+        "pentair_cloud_hub": hub,
+        "daily_gallons": {},
+    }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
