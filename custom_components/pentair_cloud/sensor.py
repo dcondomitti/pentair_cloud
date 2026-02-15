@@ -8,6 +8,7 @@ from typing import Callable
 import logging
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -24,7 +25,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN
@@ -293,7 +293,7 @@ class PentairCloudSensor(SensorEntity):
         self.hub.update_pentair_devices_status()
 
 
-class PentairFlowTotalSensor(RestoreEntity, SensorEntity):
+class PentairFlowTotalSensor(RestoreSensor):
     """Sensor that integrates flow rate over time to compute gallons."""
 
     _attr_has_entity_name = True
@@ -321,6 +321,12 @@ class PentairFlowTotalSensor(RestoreEntity, SensorEntity):
                 f"pentair_{pentair_device.pentair_device_id}_daily_gallons"
             )
             self._attr_state_class = SensorStateClass.TOTAL
+            self._last_reset_date = datetime.date.today().isoformat()
+            self._attr_last_reset = datetime.datetime.combine(
+                datetime.date.today(),
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            )
         else:
             self._attr_name = "Total Gallons"
             self._attr_unique_id = (
@@ -351,31 +357,20 @@ class PentairFlowTotalSensor(RestoreEntity, SensorEntity):
                 restored = 0.0
             if self._daily:
                 today = datetime.date.today().isoformat()
-                if (
-                    last_data.native_unit_of_measurement is not None
-                    and hasattr(last_data, "native_value")
-                ):
-                    # Check extra stored state for last_reset date
-                    last_state = await self.async_get_last_state()
-                    last_reset_date = None
-                    if last_state and last_state.attributes.get("last_reset"):
-                        try:
-                            last_reset_dt = datetime.datetime.fromisoformat(
-                                last_state.attributes["last_reset"]
-                            )
-                            last_reset_date = last_reset_dt.date().isoformat()
-                        except (ValueError, TypeError):
-                            pass
-                    if last_reset_date == today:
-                        self._total_gallons = restored
-                    else:
-                        self._total_gallons = 0.0
-                self._last_reset_date = datetime.date.today().isoformat()
-                self._attr_last_reset = datetime.datetime.combine(
-                    datetime.date.today(),
-                    datetime.time.min,
-                    tzinfo=datetime.timezone.utc,
-                )
+                # Check if the stored last_reset matches today
+                last_state = await self.async_get_last_state()
+                last_reset_date = None
+                if last_state and last_state.attributes.get("last_reset"):
+                    try:
+                        last_reset_dt = datetime.datetime.fromisoformat(
+                            last_state.attributes["last_reset"]
+                        )
+                        last_reset_date = last_reset_dt.date().isoformat()
+                    except (ValueError, TypeError):
+                        pass
+                if last_reset_date == today:
+                    self._total_gallons = restored
+                # else stays at 0.0 (new day)
             else:
                 self._total_gallons = restored
         # Always leave _last_update_ts = None so first interval is skipped
