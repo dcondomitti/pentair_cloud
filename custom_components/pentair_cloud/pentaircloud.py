@@ -183,6 +183,7 @@ class PentairCloudHub:
     def notify_action(self) -> None:
         """Mark that a user action just occurred, triggering burst polling."""
         self.last_action_time = time.time()
+        self.last_update = None
 
     def _get_update_interval(self) -> int:
         """Return dynamic minimum seconds between updates based on last action time."""

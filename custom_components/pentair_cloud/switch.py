@@ -132,11 +132,11 @@ class PentairCloudSwitch(SwitchEntity):
             await self.async_update_ha_state(force_refresh=True)
 
         delays = []
-        # Every 5s from 5–60s (12 callbacks)
+        # Every 5s from 5–60s
         delays.extend(range(5, 61, 5))
-        # Every 15s from 75–180s (8 callbacks)
+        # Every 15s from 75–180s
         delays.extend(range(75, 181, 15))
-        # Every 30s from 210–300s (4 callbacks)
+        # Every 30s from 210–300s
         delays.extend(range(210, 301, 30))
 
         for delay in delays:
