@@ -564,7 +564,7 @@ class PentairCumulativeRuntimeSensor(RestoreSensor):
 
 
 class PentairCumulativeGallonsSensor(RestoreSensor):
-    """Sensor that tracks cumulative gallons from s26, resetting only at midnight."""
+    """Sensor that tracks cumulative gallons by integrating flow rate (s26) over time."""
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.WATER
@@ -582,8 +582,8 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
         self.hub = hub
         self.pentair_device = pentair_device
         self._daily = daily
-        self._total_raw = 0.0
-        self._last_raw: int | None = None
+        self._total_gallons = 0.0
+        self._last_update_ts: float | None = None
         self._last_reset_date: str | None = None
         self._entry_id = config_entry.entry_id if config_entry else None
 
@@ -640,15 +640,15 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
                     except (ValueError, TypeError):
                         pass
                 if last_reset_date == today:
-                    self._total_raw = restored * 10
+                    self._total_gallons = restored
             else:
-                self._total_raw = restored * 10
-        self._last_raw = None
+                self._total_gallons = restored
+        self._last_update_ts = None
         self._write_daily_gallons()
 
     @property
     def native_value(self) -> float | None:
-        return round(self._total_raw / 10, 1)
+        return round(self._total_gallons, 1)
 
     def _write_daily_gallons(self) -> None:
         """Write current daily gallons to hass.data for other sensors to read."""
@@ -657,46 +657,49 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
             if entry_data is not None:
                 entry_data["daily_gallons"][
                     self.pentair_device.pentair_device_id
-                ] = self._total_raw / 10
+                ] = self._total_gallons
 
     def update(self) -> None:
         self.hub.update_pentair_devices_status()
 
-        raw = self.pentair_device.sensor_data.get("s26")
-        if raw is None:
+        now = time.monotonic()
+
+        # First reading after init/restart — establish baseline
+        if self._last_update_ts is None:
+            self._last_update_ts = now
             return
-        try:
-            current_raw = int(raw)
-        except (ValueError, TypeError):
-            return
+
+        elapsed_seconds = now - self._last_update_ts
+        # Cap elapsed time to avoid huge jumps after long gaps
+        if elapsed_seconds > 120:
+            elapsed_seconds = 120
 
         # Midnight reset (daily only)
         if self._daily:
             today = datetime.date.today().isoformat()
             if self._last_reset_date != today:
-                self._total_raw = 0.0
+                self._total_gallons = 0.0
                 self._last_reset_date = today
-                self._last_raw = current_raw
                 self._attr_last_reset = datetime.datetime.combine(
                     datetime.date.today(),
                     datetime.time.min,
                     tzinfo=datetime.timezone.utc,
                 )
+                self._last_update_ts = now
                 self._write_daily_gallons()
                 return
 
-        # First reading after init/restart — establish baseline
-        if self._last_raw is None:
-            self._last_raw = current_raw
-            self._write_daily_gallons()
-            return
+        # Get current flow rate (s26 is in tenths of GPM)
+        raw = self.pentair_device.sensor_data.get("s26")
+        if raw is not None:
+            try:
+                flow_gpm = int(raw) / 10.0  # Convert tenths to GPM
+                if flow_gpm > 0:
+                    # gallons = GPM * minutes
+                    elapsed_minutes = elapsed_seconds / 60.0
+                    self._total_gallons += flow_gpm * elapsed_minutes
+            except (ValueError, TypeError):
+                pass
 
-        if current_raw >= self._last_raw:
-            # Normal increase
-            self._total_raw += current_raw - self._last_raw
-        else:
-            # Counter reset (pump restarted), count new session gallons
-            self._total_raw += current_raw
-
-        self._last_raw = current_raw
+        self._last_update_ts = now
         self._write_daily_gallons()
