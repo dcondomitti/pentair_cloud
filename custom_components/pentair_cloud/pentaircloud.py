@@ -140,16 +140,21 @@ class PentairCloudHub:
 
     def populate_AWS_token(self) -> None:
         if self.cognito_client is not None:
-            self.cognito_client.check_token()
-            new_token = self.cognito_client.get_user()._metadata["id_token"]
-            token_changed = self.AWS_TOKEN != new_token
-            creds_expired = (
-                self.aws_credentials_expiry is not None
-                and time.time() > self.aws_credentials_expiry - 300
-            )
-            if token_changed or creds_expired:
-                self.AWS_TOKEN = new_token
-                self.populate_AWS_and_data_fields()
+            try:
+                self.cognito_client.check_token()
+                new_token = self.cognito_client.get_user()._metadata["id_token"]
+                token_changed = self.AWS_TOKEN != new_token
+                creds_expired = (
+                    self.aws_credentials_expiry is not None
+                    and time.time() > self.aws_credentials_expiry - 300
+                )
+                if token_changed or creds_expired:
+                    self.AWS_TOKEN = new_token
+                    self.populate_AWS_and_data_fields()
+            except Exception as err:
+                self.LOGGER.error(
+                    "Exception while refreshing AWS token: %s", err
+                )
 
     def populate_AWS_and_data_fields(self) -> None:
         if self.AWS_TOKEN is None:
@@ -223,6 +228,7 @@ class PentairCloudHub:
                     endpoint,
                     auth=self.get_AWS_auth(),
                     headers=self.get_pentair_header(),
+                    timeout=30,
                 )
                 for device in response.json()["data"]:
                     if device["deviceType"] == "IF31":
@@ -271,7 +277,6 @@ class PentairCloudHub:
         ):
             if DEBUG_INFO:
                 self.LOGGER.info("Pentair Cloud - Update Devices Status")
-            self.last_update = time.time()
             self.populate_AWS_token()
             if self.AWS_TOKEN is not None:
                 try:
@@ -288,48 +293,61 @@ class PentairCloudHub:
                         auth=self.get_AWS_auth(),
                         headers=self.get_pentair_header(),
                         data=devices_json,
+                        timeout=30,
                     )
                     response_data = response.json()
                     for device_response in response_data["response"]["data"]:
                         for device in self.devices:
                             if device.pentair_device_id == device_response["deviceId"]:
-                                # Check running program
-                                running_program = (
-                                    int(device_response["fields"]["s14"]["value"]) + 1
-                                )  # Index is starting at zero
-                                for i in range(
-                                    1, 9
-                                ):  # Technically 14 but after 10 are active but do not show on the app, I don't know why
-                                    if (
-                                        device_response["fields"][
-                                            "zp" + str(i) + "e13"
-                                        ]["value"]
-                                        == "1"
-                                    ):  # Program is active
-                                        program_type = int(
-                                            device_response["fields"][
-                                                "zp" + str(i) + "e5"
-                                            ]["value"]
-                                        )
-                                        device.update_program(
-                                            i,
-                                            device_response["fields"][
-                                                "zp" + str(i) + "e2"
-                                            ]["value"],
-                                            program_type,
-                                            running_program,
-                                        )
-                                # Extract sensor fields
+                                # Extract sensor fields first (independent of program parsing)
                                 SENSOR_FIELDS = ["s17", "s18", "s19", "s20", "s21", "s22", "s26", "s28", "s36", "s38", "s39", "s40", "s41", "s48"]
                                 for field_key in SENSOR_FIELDS:
                                     field = device_response["fields"].get(field_key)
                                     device.sensor_data[field_key] = field.get("value") if field is not None else None
 
+                                # Parse program fields separately so failures don't block sensor_data
+                                try:
+                                    running_program = (
+                                        int(device_response["fields"]["s14"]["value"]) + 1
+                                    )  # Index is starting at zero
+                                    for i in range(
+                                        1, 9
+                                    ):  # Technically 14 but after 10 are active but do not show on the app, I don't know why
+                                        if (
+                                            device_response["fields"][
+                                                "zp" + str(i) + "e13"
+                                            ]["value"]
+                                            == "1"
+                                        ):  # Program is active
+                                            program_type = int(
+                                                device_response["fields"][
+                                                    "zp" + str(i) + "e5"
+                                                ]["value"]
+                                            )
+                                            device.update_program(
+                                                i,
+                                                device_response["fields"][
+                                                    "zp" + str(i) + "e2"
+                                                ]["value"],
+                                                program_type,
+                                                running_program,
+                                            )
+                                except (KeyError, ValueError, TypeError) as err:
+                                    self.LOGGER.warning(
+                                        "Failed to parse program fields for device %s (sensor data still updated): %s",
+                                        device.pentair_device_id,
+                                        err,
+                                    )
+
+                    # Only mark as updated after successful data extraction
+                    self.last_update = time.time()
+
                 except Exception as err:
+                    # Set short backoff so we retry in ~10 seconds instead of full interval
+                    self.last_update = time.time() - self._get_update_interval() + 10
                     self.LOGGER.error(
-                        "Exception while updating Pentair Cloud (update device status). %s, %s",
+                        "Exception while updating Pentair Cloud (update device status). %s",
                         err,
-                        response_data,
                     )
                     try:
                         message = response_data.get("message", "")
@@ -401,6 +419,7 @@ class PentairCloudHub:
                         + 'e10":"'
                         + str(program.get_start_value())
                         + '"}}',
+                        timeout=30,
                     )
                     response_data = response.json()
                     if response_data["data"]["code"] != "set_device_success":
@@ -413,6 +432,7 @@ class PentairCloudHub:
                         auth=self.get_AWS_auth(),
                         headers=self.get_pentair_header(),
                         data='{"payload":{"p2":"99"}}',
+                        timeout=30,
                     )
                 except Exception as err:
                     self.LOGGER.error(
@@ -467,6 +487,7 @@ class PentairCloudHub:
                     + 'e10":"'
                     + str(program.get_stop_value())
                     + '"}}',
+                    timeout=30,
                 )
                 response_data = response.json()
                 if response_data["data"]["code"] != "set_device_success":
@@ -479,6 +500,7 @@ class PentairCloudHub:
                     auth=self.get_AWS_auth(),
                     headers=self.get_pentair_header(),
                     data='{"payload":{"p2":"' + str(program_id - 1) + '"}}',
+                    timeout=30,
                 )
             except Exception as err:
                 self.LOGGER.error(

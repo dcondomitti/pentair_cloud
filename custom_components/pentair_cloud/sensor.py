@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 import time
+from datetime import timedelta
 from typing import Callable
 import logging
 
@@ -16,6 +17,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     PERCENTAGE,
+    UnitOfEnergy,
     UnitOfPower,
     UnitOfPressure,
     UnitOfTemperature,
@@ -31,6 +33,8 @@ from .const import DOMAIN, DEFAULT_POOL_SIZE
 from .pentaircloud import PentairCloudHub, PentairDevice
 
 _LOGGER = logging.getLogger(__name__)
+
+SCAN_INTERVAL = timedelta(seconds=30)
 
 
 def _tenths_to_float(value: str | None) -> float | None:
@@ -422,9 +426,8 @@ class PentairDailyRuntimeSensor(RestoreSensor):
             return False
 
     def update(self) -> None:
-        self.hub.update_pentair_devices_status()
-
         now = time.monotonic()
+        self.hub.update_pentair_devices_status()
 
         if self._last_update_ts is None:
             self._last_update_ts = now
@@ -444,8 +447,15 @@ class PentairDailyRuntimeSensor(RestoreSensor):
                 tzinfo=datetime.timezone.utc,
             )
 
+        prev_total = self._total_hours
         if self._is_active():
             self._total_hours += elapsed / 3600
+
+        if self._total_hours < prev_total:
+            _LOGGER.warning(
+                "Daily runtime for %s unexpectedly decreased: %.4f -> %.4f",
+                self._attr_unique_id, prev_total, self._total_hours,
+            )
 
         self._last_update_ts = now
 
@@ -553,12 +563,17 @@ class PentairCumulativeRuntimeSensor(RestoreSensor):
             self._last_raw_seconds = current_seconds
             return
 
+        prev_total = self._total_seconds
         if current_seconds >= self._last_raw_seconds:
             # Normal increase
             self._total_seconds += current_seconds - self._last_raw_seconds
-        else:
-            # Counter reset (pump/relay restarted), count new session runtime
-            self._total_seconds += current_seconds
+        # else: counter reset (program change / pump restart) — re-baseline only
+
+        if self._total_seconds < prev_total:
+            _LOGGER.warning(
+                "Cumulative runtime for %s unexpectedly decreased: %.2f -> %.2f",
+                self._attr_unique_id, prev_total, self._total_seconds,
+            )
 
         self._last_raw_seconds = current_seconds
 
@@ -660,9 +675,8 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
                 ] = self._total_gallons
 
     def update(self) -> None:
-        self.hub.update_pentair_devices_status()
-
         now = time.monotonic()
+        self.hub.update_pentair_devices_status()
 
         # First reading after init/restart — establish baseline
         if self._last_update_ts is None:
@@ -690,6 +704,7 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
                 return
 
         # Get current flow rate (s26 is in tenths of GPM)
+        prev_total = self._total_gallons
         raw = self.pentair_device.sensor_data.get("s26")
         if raw is not None:
             try:
@@ -700,6 +715,12 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
                     self._total_gallons += flow_gpm * elapsed_minutes
             except (ValueError, TypeError):
                 pass
+
+        if self._total_gallons < prev_total:
+            _LOGGER.warning(
+                "Gallons for %s unexpectedly decreased: %.2f -> %.2f",
+                self._attr_unique_id, prev_total, self._total_gallons,
+            )
 
         self._last_update_ts = now
         self._write_daily_gallons()
