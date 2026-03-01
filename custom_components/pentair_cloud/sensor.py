@@ -1,10 +1,9 @@
 """Platform for sensor integration."""
 from __future__ import annotations
 
-import datetime
-from dataclasses import dataclass
 import time
 from datetime import timedelta
+from dataclasses import dataclass
 from typing import Callable
 import logging
 
@@ -17,7 +16,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     PERCENTAGE,
-    UnitOfEnergy,
     UnitOfPower,
     UnitOfPressure,
     UnitOfTemperature,
@@ -29,7 +27,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 
-from .const import DOMAIN, DEFAULT_POOL_SIZE
+from .const import DOMAIN
 from .pentaircloud import PentairCloudHub, PentairDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -167,7 +165,18 @@ SENSOR_DESCRIPTIONS: tuple[PentairSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         entity_registry_enabled_default=False,
     ),
-    # motor_run_time (s36) is handled by PentairCumulativeRuntimeSensor
+    PentairSensorEntityDescription(
+        key="motor_run_time",
+        translation_key="motor_run_time",
+        name="Motor Run Time",
+        field_key="s36",
+        value_fn=_int_value,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        icon="mdi:timer-outline",
+        entity_registry_enabled_default=True,
+    ),
     PentairSensorEntityDescription(
         key="wifi_signal_level",
         translation_key="wifi_signal_level",
@@ -230,15 +239,7 @@ async def async_setup_entry(
     for device in devices:
         for description in SENSOR_DESCRIPTIONS:
             entities.append(PentairCloudSensor(hub, device, description))
-        entities.append(PentairCumulativeGallonsSensor(hub, device, daily=False))
-        entities.append(
-            PentairCumulativeGallonsSensor(hub, device, daily=True, config_entry=config_entry)
-        )
-        entities.append(PentairCumulativeRuntimeSensor(hub, device, "s36", "Motor Run Time", "motor_run_time"))
-        entities.append(PentairPoolTurnoverSensor(hub, device, config_entry))
-        entities.append(PentairDailyRuntimeSensor(hub, device, "s19", "Daily Runtime", "daily_runtime"))
-        entities.append(PentairCumulativeRuntimeSensor(hub, device, "s21", "Relay 1 Daily Runtime", "relay_1_daily_runtime"))
-        entities.append(PentairCumulativeRuntimeSensor(hub, device, "s22", "Relay 2 Daily Runtime", "relay_2_daily_runtime"))
+        entities.append(PentairCumulativeGallonsSensor(hub, device))
     async_add_entities(entities)
 
 
@@ -283,306 +284,13 @@ class PentairCloudSensor(SensorEntity):
         self.hub.update_pentair_devices_status()
 
 
-
-class PentairPoolTurnoverSensor(SensorEntity):
-    """Sensor showing what percentage of the pool has been cycled today."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Pool Cycled Today"
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_suggested_display_precision = 0
-    _attr_icon = "mdi:sync"
-
-    def __init__(
-        self,
-        hub: PentairCloudHub,
-        pentair_device: PentairDevice,
-        config_entry: ConfigEntry,
-    ) -> None:
-        self.hub = hub
-        self.pentair_device = pentair_device
-        self._config_entry = config_entry
-        self._attr_unique_id = (
-            f"pentair_{pentair_device.pentair_device_id}_pool_turnover"
-        )
-
-    @property
-    def device_info(self):
-        return {
-            "identifiers": {
-                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
-            },
-            "name": self.pentair_device.nickname,
-            "model": self.pentair_device.nickname,
-            "sw_version": "1.0",
-            "manufacturer": "Pentair",
-        }
-
-    @property
-    def native_value(self) -> float | None:
-        entry_data = self.hass.data.get(DOMAIN, {}).get(
-            self._config_entry.entry_id
-        )
-        if entry_data is None:
-            return None
-        daily_gallons = entry_data["daily_gallons"].get(
-            self.pentair_device.pentair_device_id, 0.0
-        )
-        pool_size = self._config_entry.options.get(
-            f"pool_size_{self.pentair_device.pentair_device_id}",
-            DEFAULT_POOL_SIZE,
-        )
-        if pool_size <= 0:
-            return None
-        return (daily_gallons / pool_size) * 100
-
-    def update(self) -> None:
-        self.hub.update_pentair_devices_status()
-
-
-class PentairDailyRuntimeSensor(RestoreSensor):
-    """Sensor that tracks how long a field has been active today (hours)."""
-
-    _attr_has_entity_name = True
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_state_class = SensorStateClass.TOTAL
-    _attr_native_unit_of_measurement = UnitOfTime.HOURS
-    _attr_suggested_display_precision = 1
-    _attr_icon = "mdi:timer-outline"
-
-    def __init__(
-        self,
-        hub: PentairCloudHub,
-        pentair_device: PentairDevice,
-        field_key: str,
-        name: str,
-        key_suffix: str,
-    ) -> None:
-        self.hub = hub
-        self.pentair_device = pentair_device
-        self._field_key = field_key
-        self._total_hours = 0.0
-        self._last_update_ts: float | None = None
-        self._last_reset_date: str | None = datetime.date.today().isoformat()
-        self._attr_name = name
-        self._attr_unique_id = (
-            f"pentair_{pentair_device.pentair_device_id}_{key_suffix}"
-        )
-        self._attr_last_reset = datetime.datetime.combine(
-            datetime.date.today(),
-            datetime.time.min,
-            tzinfo=datetime.timezone.utc,
-        )
-
-    @property
-    def device_info(self):
-        return {
-            "identifiers": {
-                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
-            },
-            "name": self.pentair_device.nickname,
-            "model": self.pentair_device.nickname,
-            "sw_version": "1.0",
-            "manufacturer": "Pentair",
-        }
-
-    async def async_added_to_hass(self) -> None:
-        """Restore state after restart."""
-        await super().async_added_to_hass()
-        last_data = await self.async_get_last_sensor_data()
-        if last_data and last_data.native_value is not None:
-            try:
-                restored = float(last_data.native_value)
-            except (ValueError, TypeError):
-                restored = 0.0
-            today = datetime.date.today().isoformat()
-            last_state = await self.async_get_last_state()
-            last_reset_date = None
-            if last_state and last_state.attributes.get("last_reset"):
-                try:
-                    last_reset_dt = datetime.datetime.fromisoformat(
-                        last_state.attributes["last_reset"]
-                    )
-                    last_reset_date = last_reset_dt.date().isoformat()
-                except (ValueError, TypeError):
-                    pass
-            if last_reset_date == today:
-                self._total_hours = restored
-        self._last_update_ts = None
-
-    @property
-    def native_value(self) -> float | None:
-        return round(self._total_hours, 2)
-
-    def _is_active(self) -> bool:
-        """Return True if the monitored field indicates an active state."""
-        raw = self.pentair_device.sensor_data.get(self._field_key)
-        if raw is None:
-            return False
-        try:
-            return int(raw) > 0
-        except (ValueError, TypeError):
-            return False
-
-    def update(self) -> None:
-        now = time.monotonic()
-        self.hub.update_pentair_devices_status()
-
-        if self._last_update_ts is None:
-            self._last_update_ts = now
-            return
-
-        elapsed = now - self._last_update_ts
-        if elapsed > 120:
-            elapsed = 120
-
-        today = datetime.date.today().isoformat()
-        if self._last_reset_date != today:
-            self._total_hours = 0.0
-            self._last_reset_date = today
-            self._attr_last_reset = datetime.datetime.combine(
-                datetime.date.today(),
-                datetime.time.min,
-                tzinfo=datetime.timezone.utc,
-            )
-
-        prev_total = self._total_hours
-        if self._is_active():
-            self._total_hours += elapsed / 3600
-
-        if self._total_hours < prev_total:
-            _LOGGER.warning(
-                "Daily runtime for %s unexpectedly decreased: %.4f -> %.4f",
-                self._attr_unique_id, prev_total, self._total_hours,
-            )
-
-        self._last_update_ts = now
-
-
-class PentairCumulativeRuntimeSensor(RestoreSensor):
-    """Sensor that tracks cumulative runtime from an API counter, resetting only at midnight."""
-
-    _attr_has_entity_name = True
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_state_class = SensorStateClass.TOTAL
-    _attr_native_unit_of_measurement = UnitOfTime.HOURS
-    _attr_suggested_display_precision = 1
-    _attr_icon = "mdi:timer-outline"
-
-    def __init__(
-        self,
-        hub: PentairCloudHub,
-        pentair_device: PentairDevice,
-        field_key: str,
-        name: str,
-        key_suffix: str,
-    ) -> None:
-        self.hub = hub
-        self.pentair_device = pentair_device
-        self._field_key = field_key
-        self._total_seconds = 0.0
-        self._last_raw_seconds: int | None = None
-        self._last_reset_date: str | None = datetime.date.today().isoformat()
-        self._attr_name = name
-        self._attr_unique_id = (
-            f"pentair_{pentair_device.pentair_device_id}_{key_suffix}"
-        )
-        self._attr_last_reset = datetime.datetime.combine(
-            datetime.date.today(),
-            datetime.time.min,
-            tzinfo=datetime.timezone.utc,
-        )
-
-    @property
-    def device_info(self):
-        return {
-            "identifiers": {
-                (DOMAIN, f"pentair_{self.pentair_device.pentair_device_id}")
-            },
-            "name": self.pentair_device.nickname,
-            "model": self.pentair_device.nickname,
-            "sw_version": "1.0",
-            "manufacturer": "Pentair",
-        }
-
-    async def async_added_to_hass(self) -> None:
-        """Restore state after restart."""
-        await super().async_added_to_hass()
-        last_data = await self.async_get_last_sensor_data()
-        if last_data and last_data.native_value is not None:
-            try:
-                restored = float(last_data.native_value)
-            except (ValueError, TypeError):
-                restored = 0.0
-            today = datetime.date.today().isoformat()
-            last_state = await self.async_get_last_state()
-            last_reset_date = None
-            if last_state and last_state.attributes.get("last_reset"):
-                try:
-                    last_reset_dt = datetime.datetime.fromisoformat(
-                        last_state.attributes["last_reset"]
-                    )
-                    last_reset_date = last_reset_dt.date().isoformat()
-                except (ValueError, TypeError):
-                    pass
-            if last_reset_date == today:
-                self._total_seconds = restored * 3600
-        self._last_raw_seconds = None
-
-    @property
-    def native_value(self) -> float | None:
-        return round(self._total_seconds / 3600, 2)
-
-    def update(self) -> None:
-        self.hub.update_pentair_devices_status()
-
-        raw = self.pentair_device.sensor_data.get(self._field_key)
-        if raw is None:
-            return
-        try:
-            current_seconds = int(raw)
-        except (ValueError, TypeError):
-            return
-
-        # Midnight reset
-        today = datetime.date.today().isoformat()
-        if self._last_reset_date != today:
-            self._total_seconds = 0.0
-            self._last_reset_date = today
-            self._last_raw_seconds = current_seconds
-            self._attr_last_reset = datetime.datetime.combine(
-                datetime.date.today(),
-                datetime.time.min,
-                tzinfo=datetime.timezone.utc,
-            )
-            return
-
-        # First reading after init/restart — establish baseline
-        if self._last_raw_seconds is None:
-            self._last_raw_seconds = current_seconds
-            return
-
-        prev_total = self._total_seconds
-        if current_seconds >= self._last_raw_seconds:
-            # Normal increase
-            self._total_seconds += current_seconds - self._last_raw_seconds
-        # else: counter reset (program change / pump restart) — re-baseline only
-
-        if self._total_seconds < prev_total:
-            _LOGGER.warning(
-                "Cumulative runtime for %s unexpectedly decreased: %.2f -> %.2f",
-                self._attr_unique_id, prev_total, self._total_seconds,
-            )
-
-        self._last_raw_seconds = current_seconds
-
-
 class PentairCumulativeGallonsSensor(RestoreSensor):
     """Sensor that tracks cumulative gallons by integrating flow rate (s26) over time."""
 
     _attr_has_entity_name = True
+    _attr_name = "Total Gallons"
     _attr_device_class = SensorDeviceClass.WATER
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:water"
@@ -591,35 +299,14 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
         self,
         hub: PentairCloudHub,
         pentair_device: PentairDevice,
-        daily: bool,
-        config_entry: ConfigEntry | None = None,
     ) -> None:
         self.hub = hub
         self.pentair_device = pentair_device
-        self._daily = daily
         self._total_gallons = 0.0
         self._last_update_ts: float | None = None
-        self._last_reset_date: str | None = None
-        self._entry_id = config_entry.entry_id if config_entry else None
-
-        if daily:
-            self._attr_name = "Daily Gallons"
-            self._attr_unique_id = (
-                f"pentair_{pentair_device.pentair_device_id}_daily_gallons"
-            )
-            self._attr_state_class = SensorStateClass.TOTAL
-            self._last_reset_date = datetime.date.today().isoformat()
-            self._attr_last_reset = datetime.datetime.combine(
-                datetime.date.today(),
-                datetime.time.min,
-                tzinfo=datetime.timezone.utc,
-            )
-        else:
-            self._attr_name = "Total Gallons"
-            self._attr_unique_id = (
-                f"pentair_{pentair_device.pentair_device_id}_total_gallons"
-            )
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_unique_id = (
+            f"pentair_{pentair_device.pentair_device_id}_total_gallons"
+        )
 
     @property
     def device_info(self):
@@ -639,40 +326,14 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
         last_data = await self.async_get_last_sensor_data()
         if last_data and last_data.native_value is not None:
             try:
-                restored = float(last_data.native_value)
+                self._total_gallons = float(last_data.native_value)
             except (ValueError, TypeError):
-                restored = 0.0
-            if self._daily:
-                today = datetime.date.today().isoformat()
-                last_state = await self.async_get_last_state()
-                last_reset_date = None
-                if last_state and last_state.attributes.get("last_reset"):
-                    try:
-                        last_reset_dt = datetime.datetime.fromisoformat(
-                            last_state.attributes["last_reset"]
-                        )
-                        last_reset_date = last_reset_dt.date().isoformat()
-                    except (ValueError, TypeError):
-                        pass
-                if last_reset_date == today:
-                    self._total_gallons = restored
-            else:
-                self._total_gallons = restored
+                self._total_gallons = 0.0
         self._last_update_ts = None
-        self._write_daily_gallons()
 
     @property
     def native_value(self) -> float | None:
         return round(self._total_gallons, 1)
-
-    def _write_daily_gallons(self) -> None:
-        """Write current daily gallons to hass.data for other sensors to read."""
-        if self._daily and self._entry_id and self.hass:
-            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
-            if entry_data is not None:
-                entry_data["daily_gallons"][
-                    self.pentair_device.pentair_device_id
-                ] = self._total_gallons
 
     def update(self) -> None:
         now = time.monotonic()
@@ -688,39 +349,15 @@ class PentairCumulativeGallonsSensor(RestoreSensor):
         if elapsed_seconds > 120:
             elapsed_seconds = 120
 
-        # Midnight reset (daily only)
-        if self._daily:
-            today = datetime.date.today().isoformat()
-            if self._last_reset_date != today:
-                self._total_gallons = 0.0
-                self._last_reset_date = today
-                self._attr_last_reset = datetime.datetime.combine(
-                    datetime.date.today(),
-                    datetime.time.min,
-                    tzinfo=datetime.timezone.utc,
-                )
-                self._last_update_ts = now
-                self._write_daily_gallons()
-                return
-
         # Get current flow rate (s26 is in tenths of GPM)
-        prev_total = self._total_gallons
         raw = self.pentair_device.sensor_data.get("s26")
         if raw is not None:
             try:
-                flow_gpm = int(raw) / 10.0  # Convert tenths to GPM
+                flow_gpm = int(raw) / 10.0
                 if flow_gpm > 0:
-                    # gallons = GPM * minutes
                     elapsed_minutes = elapsed_seconds / 60.0
                     self._total_gallons += flow_gpm * elapsed_minutes
             except (ValueError, TypeError):
                 pass
 
-        if self._total_gallons < prev_total:
-            _LOGGER.warning(
-                "Gallons for %s unexpectedly decreased: %.2f -> %.2f",
-                self._attr_unique_id, prev_total, self._total_gallons,
-            )
-
         self._last_update_ts = now
-        self._write_daily_gallons()
