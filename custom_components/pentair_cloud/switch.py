@@ -122,8 +122,11 @@ class PentairCloudSwitch(SwitchEntity):
         self._schedule_refreshes()
 
     def _schedule_refreshes(self) -> None:
-        """Schedule tapering refresh callbacks after an action."""
-        # Cancel any previously scheduled refreshes
+        """Schedule tapering refresh callbacks after an action.
+
+        Every 1s for the first 10s, then exponential backoff (2, 4, 8, 16,
+        32, 64, 128s intervals) matching the hub rate limiter.
+        """
         for cancel in self._scheduled_refreshes:
             cancel()
         self._scheduled_refreshes.clear()
@@ -132,12 +135,15 @@ class PentairCloudSwitch(SwitchEntity):
             await self.async_update_ha_state(force_refresh=True)
 
         delays = []
-        # Every 5s from 5–60s
-        delays.extend(range(5, 61, 5))
-        # Every 15s from 75–180s
-        delays.extend(range(75, 181, 15))
-        # Every 30s from 210–300s
-        delays.extend(range(210, 301, 30))
+        # Every 1s for the first 10s
+        delays.extend(range(1, 11))
+        # Exponential backoff: 2, 4, 8, 16, 32, 64, 128
+        t = 10
+        interval = 2
+        while interval < 300:
+            t += interval
+            delays.append(t)
+            interval *= 2
 
         for delay in delays:
             cancel = async_call_later(self.hass, delay, _refresh)

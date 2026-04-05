@@ -18,7 +18,8 @@ PENTAIR_USER_PROFILE_PATH = "/user/user-service/common/profilev2"
 PENTAIR_DEVICES_PATH = "/device/device-service/user/devices"
 PENTAIR_DEVICES_2_PATH = "/device2/device2-service/user/device"
 PENTAIR_DEVICE_SERVICE_PATH = "/device/device-service/user/device/"
-UPDATE_MIN_SECONDS = 60  # Minimum time between two update requests
+UPDATE_MIN_SECONDS = 300  # Default: 5 minutes between updates
+OVERNIGHT_UPDATE_SECONDS = 600  # Overnight (10pm–6am): 10 minutes between updates
 PROGRAM_START_MIN_SECONDS = 30  # Minimum time between two requests to start a program
 
 
@@ -191,16 +192,34 @@ class PentairCloudHub:
         self.last_update = None
 
     def _get_update_interval(self) -> int:
-        """Return dynamic minimum seconds between updates based on last action time."""
+        """Return dynamic minimum seconds between updates.
+
+        After a user action: 1s for the first 10s, then exponential backoff
+        (2, 4, 8, 16, 32, 64, 128s) until capped at 5 min.
+        Overnight (10pm–6am): 10 min.
+        Default (no recent action): 5 min.
+        """
+        from datetime import datetime
+
+        hour = datetime.now().hour
+        if hour >= 22 or hour < 6:
+            return OVERNIGHT_UPDATE_SECONDS
+
         if self.last_action_time is None:
             return UPDATE_MIN_SECONDS
+
         elapsed = time.time() - self.last_action_time
-        if elapsed <= 60:
-            return 5
-        elif elapsed <= 180:
-            return 15
-        elif elapsed <= 300:
-            return 30
+        if elapsed <= 10:
+            return 1
+
+        # Exponential backoff: 2, 4, 8, 16, 32, 64, 128, then cap at 5 min
+        t = 10
+        interval = 2
+        while interval < UPDATE_MIN_SECONDS:
+            t += interval
+            if elapsed <= t:
+                return interval
+            interval *= 2
         return UPDATE_MIN_SECONDS
 
     def get_pentair_header(self) -> str:
